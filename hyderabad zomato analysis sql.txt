@@ -1,0 +1,211 @@
+-- 1. SETUP DATABASE AND SCHEMA 
+CREATE DATABASE IF NOT EXISTS zomato_analysis;
+USE zomato_analysis; 
+
+DROP TABLE IF EXISTS zomato_restaurant; 
+CREATE TABLE zomato_restaurant(
+restaurant_name VARCHAR(255),
+dining_rating DECIMAL(3,1) NULL,
+delivery_rating DECIMAL (3,1) NULL,
+dining_votes INT,
+delivery_votes INT,
+cuisine VARCHAR(255),
+place_name VARCHAR(255),
+city_name VARCHAR(100),
+item_name VARCHAR(500),
+best_seller VARCHAR(100) NULL,
+votes INT,
+price DECIMAL(10,2)
+); 
+
+-- Data Loading.
+-- Dataset Imported using MySQL Workbench Table Data Import Wizard (CSV).
+
+-- Data Quality Checks.
+-- Validate Completeness and Detect Outliers before Analysis.
+SELECT 
+	  COUNT(*) AS total_rows,
+      COUNT(dining_rating) AS dining_rating_present,
+      COUNT(delivery_rating) AS delivery_rating_present
+FROM zomato_restaurant;
+
+-- Check Price Outliers
+SELECT
+	 MIN(price) AS min_price,
+     MAX(price) AS max_price,
+     AVG(price) AS avg_price
+FROM zomato_restaurant;
+
+ -- DATA CLEANING
+-- Purpose: To understand data completeness before calculating averages.
+SELECT COUNT(*)
+FROM zomato_restaurant
+WHERE price IS NULL;  
+
+-- Applied COALESCE to handle NULLs, transforming missing values into a 'Regular' status for cleaner downstream analysis.
+SELECT item_name,
+COALESCE(best_seller, 'Regular') AS item_status,
+price
+FROM zomato_restaurant; 
+
+-- Disable safe mode to allow deletion based on 'votes'
+SET SQL_SAFE_UPDATES = 0;
+
+-- Remove Duplicate Menu Items.
+-- Deduplication Logic: Retaining Records With Highest Customer Engagement.
+DELETE z1
+FROM zomato_restaurant z1
+JOIN zomato_restaurant z2
+ON z1.restaurant_name = z2.restaurant_name
+AND z1.item_name = z2.item_name
+AND z1.city_name = z2.city_name
+AND z1.price = z2.price
+WHERE z1.votes < z2.votes; 
+-- Re-enable safe mode.
+SET SQL_SAFE_UPDATES = 1; 
+
+-- Geographic Market Penteration: Ranking City-Level Restaurant Density
+-- Business Use: Market expansion planning to identify underserved vs saturated markets.
+SELECT city_name, place_name,
+count(DISTINCT restaurant_name) AS restaurant_count
+FROM zomato_restaurant
+GROUP BY city_name, place_name
+ORDER BY restaurant_count DESC;  
+
+-- Hyper local Cuisine gaps: Mapping Food Supply by Neighborhood.
+-- Business Use: Identifying missing cuisine for new restaurant venntures.
+SELECT cuisine, place_name, COUNT(*) AS menu_item_count
+FROM zomato_restaurant
+GROUP BY place_name, cuisine
+ORDER BY place_name ASC, menu_item_count DESC;
+
+-- Integrated Market Audit: Menu Breadth vs Product Excellence
+-- Business Use: Identifying Anchor Restaurants That Dominate Via Both Variety and Star Items. 
+SELECT place_name,
+restaurant_name,
+COUNT(item_name) OVER(PARTITION BY restaurant_name) AS total_menu_size, 
+item_name,
+best_seller,
+votes,
+price
+FROM zomato_restaurant
+WHERE best_seller = 'YES'
+OR votes > 100
+ORDER BY total_menu_size DESC, votes DESC;
+
+-- Segmented Price Analysis: Bestseller vs Value Items.
+-- Business Use: Validating If Popular Items Are Priced Correctly Relative To The Area Average.
+SELECT place_name, item_name, best_seller, price,
+    ROUND(AVG(price) OVER(PARTITION BY place_name, best_seller), 2) AS category_avg_price,
+    ROUND(price - AVG(price) OVER(PARTITION BY place_name, best_seller), 2) AS price_variance
+FROM zomato_restaurant
+ORDER BY place_name, best_seller, price DESC; 
+
+-- Most Popular Menu Items With Venue Context.
+-- Business Use: Identifying the Exact Restaurant-Item Combination to Promote. 
+SELECT restaurant_name, item_name,
+SUM(dining_votes) AS total_votes
+FROM zomato_restaurant
+GROUP BY restaurant_name, item_name
+ORDER BY total_votes DESC
+LIMIT 20;
+
+-- Restaurant & Cuisine Engagement Audit.
+-- Business Use: Identifying Market Leaders for Specific Food Categories. 
+SELECT restaurant_name, cuisine,
+SUM(dining_votes + delivery_votes) AS total_engagement,
+ROUND(AVG(dining_votes + delivery_votes), 2) AS avg_enagagement
+FROM zomato_restaurant
+GROUP BY restaurant_name, cuisine
+ORDER BY total_engagement DESC
+LIMIT 10;
+
+-- Pricing Strategy Validation: Bestseller vs Normal Price Gap.
+-- Business Use: Determining if we are Charging a "Premium" For Our Top Items.
+ SELECT 
+    place_name,
+    restaurant_name,
+	ROUND(AVG(CASE 
+        WHEN best_seller IN ('BESTSELLER','MUST TRY') 
+        THEN price 
+    END), 2) AS bestseller_avg_price,
+    ROUND(AVG(CASE 
+        WHEN best_seller NOT IN ('BESTSELLER','MUST TRY') 
+             OR best_seller IS NULL 
+        THEN price 
+    END), 2) AS normal_avg_price,
+    ROUND(AVG(CASE
+    WHEN best_seller IN ('BESTSELLER', 'MUST TRY')
+    THEN price
+    END)
+    -
+    AVG(CASE
+    WHEN best_seller NOT IN ('BESTSELLER', 'MUST TRY')
+    OR best_seller IS NULL
+    THEN price
+    END),
+    2) AS price_diff
+FROM zomato_restaurant
+GROUP BY place_name, restaurant_name
+HAVING
+COUNT(CASE WHEN best_seller IN ('BESTSELLER', 'MUST TRY')
+     THEN 1
+     END) > 0
+     AND
+COUNT(CASE WHEN best_seller NOT IN ('BESTSELLER', 'MUST TRY') 
+	 OR best_seller is NULL
+     THEN 1
+     END) > 0 
+ORDER BY price_diff DESC;  
+
+-- Restaurant Price Segmentation Analysis, Price Point Distribution & Cuisine Poistioning Analysis.
+-- Business Use: Determinig the Price Persona of each Restaurant.
+SELECT 
+restaurant_name, cuisine,
+CASE 
+    WHEN (price + 0) < 200 THEN 'LOW'
+    WHEN (price + 0) >= 200 AND (price + 0) <= 500 THEN 'Medium'
+    ELSE 'High (Premium)'
+    END AS price_category,
+    COUNT(*) AS item_count
+FROM zomato_restaurant
+GROUP BY restaurant_name, price_category, cuisine
+ORDER BY restaurant_name, item_count DESC; 
+
+
+-- PROJECT CONCLUSION & KEY LEARNINGS.
+
+-- 1. Locality - level analysis proved more valuable than city level analysis since the dataset contains a single city (Hyderabad).
+--    Insights dervied at the place_name level revealed meaningful demand and pricing patterns.
+
+-- 2. Cuisine popularityvaries significantly by area, indicating that hyperlocal food preferences play a major role in 
+--    customer engagement and should guide restaurant expansion and menu lanning decision.
+
+-- 3. Bestseller and high vote menu items are generally priced higher than regular items, suggesting customer are 
+--    willing to pay a premium for preceived quality and popularity.
+
+-- 4. Menu size alone does not drive engagement. Restaurant with focused menus and high performing items often outperform
+--    those with larger menus.
+
+-- 5. Data quality checks and deduplication were essential to ensure accurate ggregation, price comparision, and enagement analysis. 
+
+-- 6. Advanced SQL techniques such as window functions, conditional aggregation and CASE based segmentation enabled business ready insights
+--    without requiring additonal tables or complexs joins.
+
+-- Overall, this projects demonstrates the ability to clean, analyze and interpret real world food delivery data using SQL, while
+-- aligning technical outputs with practical business decision.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
